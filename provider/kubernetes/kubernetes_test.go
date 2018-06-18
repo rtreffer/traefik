@@ -416,6 +416,102 @@ func TestHostlessIngress(t *testing.T) {
 	assert.Equal(t, expected, actual)
 }
 
+func TestMultiNamespaceHostCollision(t *testing.T) {
+	ingresses := []*extensionsv1beta1.Ingress{
+		buildIngress(iNamespace("ns1"),
+			iRules(
+				iRule(
+					iHost("service"),
+					iPaths(onePath(iBackend("service1", intstr.FromInt(80))))),
+			),
+		),
+		buildIngress(iNamespace("ns2"),
+			iRules(
+				iRule(
+					iHost("service"),
+					iPaths(onePath(iBackend("service2", intstr.FromInt(80))))),
+			),
+		),
+	}
+
+	services := []*corev1.Service{
+		buildService(
+			sName("service1"),
+			sNamespace("ns1"),
+			sUID("1"),
+			sSpec(
+				clusterIP("10.0.0.1"),
+				sPorts(sPort(80, ""))),
+		),
+		buildService(
+			sName("service2"),
+			sNamespace("ns2"),
+			sUID("2"),
+			sSpec(
+				clusterIP("10.0.1.1"),
+				sPorts(sPort(80, ""))),
+		),
+	}
+
+	endpoints := []*corev1.Endpoints{
+		buildEndpoint(
+			eNamespace("ns1"),
+			eName("service1"),
+			eUID("1"),
+			subset(
+				eAddresses(eAddress("10.10.0.1")),
+				ePorts(ePort(8080, ""))),
+			subset(
+				eAddresses(eAddress("10.10.0.2")),
+				ePorts(ePort(8080, ""))),
+		),
+		buildEndpoint(
+			eNamespace("ns2"),
+			eName("service2"),
+			eUID("2"),
+			subset(
+				eAddresses(eAddress("10.20.0.1")),
+				ePorts(ePort(8080, ""))),
+			subset(
+				eAddresses(eAddress("10.20.0.2")),
+				ePorts(ePort(8080, ""))),
+		),
+	}
+
+	watchChan := make(chan interface{})
+	client := clientMock{
+		ingresses: ingresses,
+		services:  services,
+		endpoints: endpoints,
+		watchChan: watchChan,
+	}
+	provider := Provider{}
+
+	actual, err := provider.loadIngresses(client)
+	require.NoError(t, err, "error loading ingresses")
+
+	expected := buildConfiguration(
+		backends(
+			backend("service",
+				servers(
+					server("http://10.10.0.1:8080", weight(1)),
+					server("http://10.10.0.2:8080", weight(1)),
+					server("http://10.20.0.1:8080", weight(1)),
+					server("http://10.20.0.2:8080", weight(1)),
+				),
+				lbMethod("wrr"),
+			),
+		),
+		frontends(
+			frontend("service",
+				passHostHeader(),
+				routes(route("service", "Host:service"))),
+		),
+	)
+
+	assert.EqualValues(t, expected, actual)
+}
+
 func TestServiceAnnotations(t *testing.T) {
 	ingresses := []*extensionsv1beta1.Ingress{
 		buildIngress(iNamespace("testing"),
